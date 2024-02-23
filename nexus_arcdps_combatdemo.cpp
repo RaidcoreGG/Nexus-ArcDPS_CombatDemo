@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <Windows.h>
 #include "imgui/imgui.h"
+#include "nexus/Nexus.h"
 
 /* arcdps export table */
 typedef struct arcdps_exports {
@@ -65,102 +66,70 @@ typedef struct ag {
 } ag;
 
 /* proto/globals */
+HMODULE hSelf;
 uint32_t cbtcount = 0;
-arcdps_exports arc_exports;
-char* arcvers;
-void dll_init(HANDLE hModule);
-void dll_exit();
-extern "C" __declspec(dllexport) void* get_init_addr(char* arcversion, ImGuiContext * imguictx, void* id3dptr, HANDLE arcdll, void* mallocfn, void* freefn, uint32_t d3dversion);
-extern "C" __declspec(dllexport) void* get_release_addr();
-arcdps_exports* mod_init();
-uintptr_t mod_release();
-uintptr_t mod_wnd(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
-uintptr_t mod_combat(cbtevent* ev, ag* src, ag* dst, char* skillname, uint64_t id, uint64_t revision);
-void log_file(char* str);
-void log_arc(char* str);
+AddonDefinition AddonDef{};
+AddonAPI* APIDefs = nullptr;
+void mod_init(AddonAPI*);
+void mod_release();
+UINT mod_wnd(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+void mod_combat(void*);
 
 /* arcdps exports */
 void* filelog;
 void* arclog;
 
 /* dll main -- winapi */
-BOOL APIENTRY DllMain(HANDLE hModule, DWORD ulReasonForCall, LPVOID lpReserved) {
-	switch (ulReasonForCall) {
-	case DLL_PROCESS_ATTACH: dll_init(hModule); break;
-	case DLL_PROCESS_DETACH: dll_exit(); break;
-
-	case DLL_THREAD_ATTACH:  break;
-	case DLL_THREAD_DETACH:  break;
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD  ul_reason_for_call, LPVOID lpReserved)
+{
+	switch (ul_reason_for_call)
+	{
+	case DLL_PROCESS_ATTACH: hSelf = hModule; break;
+	case DLL_PROCESS_DETACH: break;
+	case DLL_THREAD_ATTACH: break;
+	case DLL_THREAD_DETACH: break;
 	}
-	return 1;
+	return TRUE;
 }
 
-/* log to arcdps.log, thread/async safe */
-void log_file(char* str) {
-	size_t(*log)(char*) = (size_t(*)(char*))filelog;
-	if (log) (*log)(str);
-	return;
+extern "C" __declspec(dllexport) AddonDefinition* GetAddonDef()
+{
+	AddonDef.Signature = 0xFFFA;
+	AddonDef.APIVersion = NEXUS_API_VERSION;
+	AddonDef.Name = "combatdemo";
+	AddonDef.Version.Major = 0;
+	AddonDef.Version.Minor = 1;
+	AddonDef.Version.Build = 0;
+	AddonDef.Version.Revision = 0;
+	AddonDef.Author = "Raidcore (Port)";
+	AddonDef.Description = "arcdps combatdemo";
+	AddonDef.Load = mod_init;
+	AddonDef.Unload = mod_release;
+	AddonDef.Flags = EAddonFlags_None;
+
+	return &AddonDef;
 }
 
-/* log to extensions tab in arcdps log window, thread/async safe */
-void log_arc(char* str) {
-	size_t(*log)(char*) = (size_t(*)(char*))arclog;
-	if (log) (*log)(str);
-	return;
+void mod_init(AddonAPI* aApi)
+{
+	APIDefs = aApi;
+	ImGui::SetCurrentContext(APIDefs->ImguiContext);
+	ImGui::SetAllocatorFunctions((void* (*)(size_t, void*))APIDefs->ImguiMalloc, (void(*)(void*, void*))APIDefs->ImguiFree); // on imgui 1.80+
+
+	APIDefs->SubscribeEvent("EV_ARCDPS_COMBATEVENT_LOCAL_RAW", mod_combat);
+	APIDefs->SubscribeEvent("EV_ARCDPS_COMBATEVENT_SQUAD_RAW", mod_combat);
+
+	APIDefs->Log(ELogLevel_INFO, "combatdemo: done mod_init");
 }
 
-/* dll attach -- from winapi */
-void dll_init(HANDLE hModule) {
-	return;
+void mod_release()
+{
+	APIDefs->UnsubscribeEvent("EV_ARCDPS_COMBATEVENT_LOCAL_RAW", mod_combat);
+	APIDefs->UnsubscribeEvent("EV_ARCDPS_COMBATEVENT_SQUAD_RAW", mod_combat);
 }
 
-/* dll detach -- from winapi */
-void dll_exit() {
-	return;
-}
-
-/* export -- arcdps looks for this exported function and calls the address it returns on client load */
-extern "C" __declspec(dllexport) void* get_init_addr(char* arcversion, ImGuiContext * imguictx, void* id3dptr, HANDLE arcdll, void* mallocfn, void* freefn, uint32_t d3dversion) {
-	// id3dptr is IDirect3D9* if d3dversion==9, or IDXGISwapChain* if d3dversion==11
-	arcvers = arcversion;
-	filelog = (void*)GetProcAddress((HMODULE)arcdll, "e3");
-	arclog = (void*)GetProcAddress((HMODULE)arcdll, "e8");
-	ImGui::SetCurrentContext((ImGuiContext*)imguictx);
-	ImGui::SetAllocatorFunctions((void* (*)(size_t, void*))mallocfn, (void (*)(void*, void*))freefn); // on imgui 1.80+
-	return mod_init;
-}
-
-/* export -- arcdps looks for this exported function and calls the address it returns on client exit */
-extern "C" __declspec(dllexport) void* get_release_addr() {
-	arcvers = 0;
-	return mod_release;
-}
-
-/* initialize mod -- return table that arcdps will use for callbacks. exports struct and strings are copied to arcdps memory only once at init */
-arcdps_exports* mod_init() {
-	/* for arcdps */
-	memset(&arc_exports, 0, sizeof(arcdps_exports));
-	arc_exports.sig = 0xFFFA;
-	arc_exports.imguivers = IMGUI_VERSION_NUM;
-	arc_exports.size = sizeof(arcdps_exports);
-	arc_exports.out_name = "combatdemo";
-	arc_exports.out_build = "0.1";
-	arc_exports.wnd_nofilter = mod_wnd;
-	arc_exports.combat = mod_combat;
-	//arc_exports.size = (uintptr_t)"error message if you decide to not load, sig must be 0";
-	log_arc((char*)"combatdemo: done mod_init"); // if using vs2015+, project properties > c++ > conformance mode > permissive to avoid const to not const conversion error
-	log_file((char*)"combatdemo: done mod init");
-	return &arc_exports;
-}
-
-/* release mod -- return ignored */
-uintptr_t mod_release() {
-	FreeConsole();
-	return 0;
-}
-
-/* window callback -- return is assigned to umsg (return zero to not be processed by arcdps or game) */
-uintptr_t mod_wnd(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+UINT mod_wnd(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
 	/* much lazy */
 	char buff[4096];
 	char* p = &buff[0];
@@ -183,36 +152,49 @@ uintptr_t mod_wnd(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 	return uMsg;
 }
 
+struct EvCombatData
+{
+	cbtevent* ev;
+	ag* src;
+	ag* dst;
+	char* skillname;
+	uint64_t id;
+	uint64_t revision;
+};
+
 /* combat callback -- may be called asynchronously, use id param to keep track of order, first event id will be 2. return ignored */
 /* at least one participant will be party/squad or minion of, or a buff applied by squad in the case of buff remove. not all statechanges present, see evtc statechange enum */
-uintptr_t mod_combat(cbtevent* ev, ag* src, ag* dst, char* skillname, uint64_t id, uint64_t revision) {
+void mod_combat(void* aEventArgs)
+{
+	EvCombatData* cbtEv = (EvCombatData*)aEventArgs;
+
 	/* much lazy */
 	char buff[4096];
 	char* p = &buff[0];
 
 	/* ev is null. dst will only be valid on tracking add. skillname will also be null */
-	if (!ev) {
+	if (!cbtEv->ev) {
 
 		/* notify tracking change */
-		if (!src->elite) {
+		if (!cbtEv->src->elite) {
 
 			/* add */
-			if (src->prof) {
+			if (cbtEv->src->prof) {
 				p += _snprintf_s(p, 400, _TRUNCATE, "==== cbtnotify ====\n");
-				p += _snprintf_s(p, 400, _TRUNCATE, "agent added: %s:%s (%0llx), instid: %u, prof: %u, elite: %u, self: %u, team: %u, subgroup: %u\n", src->name, dst->name, src->id, dst->id, dst->prof, dst->elite, dst->self, src->team, dst->team);
+				p += _snprintf_s(p, 400, _TRUNCATE, "agent added: %s:%s (%0llx), instid: %u, prof: %u, elite: %u, self: %u, team: %u, subgroup: %u\n", cbtEv->src->name, cbtEv->dst->name, cbtEv->src->id, cbtEv->dst->id, cbtEv->dst->prof, cbtEv->dst->elite, cbtEv->dst->self, cbtEv->src->team, cbtEv->dst->team);
 			}
 
 			/* remove */
 			else {
 				p += _snprintf_s(p, 400, _TRUNCATE, "==== cbtnotify ====\n");
-				p += _snprintf_s(p, 400, _TRUNCATE, "agent removed: %s (%0llx)\n", src->name, src->id);
+				p += _snprintf_s(p, 400, _TRUNCATE, "agent removed: %s (%0llx)\n", cbtEv->src->name, cbtEv->src->id);
 			}
 		}
 
 		/* target change */
-		else if (src->elite == 1) {
+		else if (cbtEv->src->elite == 1) {
 			p += _snprintf_s(p, 400, _TRUNCATE, "==== cbtnotify ====\n");
-			p += _snprintf_s(p, 400, _TRUNCATE, "new target: %0llx\n", src->id);
+			p += _snprintf_s(p, 400, _TRUNCATE, "new target: %0llx\n", cbtEv->src->id);
 		}
 	}
 
@@ -220,74 +202,72 @@ uintptr_t mod_combat(cbtevent* ev, ag* src, ag* dst, char* skillname, uint64_t i
 	else {
 
 		/* default names */
-		if (!src->name || !strlen(src->name)) src->name = (char*)"(area)";
-		if (!dst->name || !strlen(dst->name)) dst->name = (char*)"(area)";
+		if (!cbtEv->src->name || !strlen(cbtEv->src->name)) cbtEv->src->name = (char*)"(area)";
+		if (!cbtEv->dst->name || !strlen(cbtEv->dst->name)) cbtEv->dst->name = (char*)"(area)";
 
 		/* common */
-		p += _snprintf_s(p, 400, _TRUNCATE, "combatdemo: ==== cbtevent %u at %llu ====\n", cbtcount, ev->time);
-		p += _snprintf_s(p, 400, _TRUNCATE, "source agent: %s (%0llx:%u, %lx:%lx), master: %u\n", src->name, ev->src_agent, ev->src_instid, src->prof, src->elite, ev->src_master_instid);
-		if (ev->dst_agent) p += _snprintf_s(p, 400, _TRUNCATE, "target agent: %s (%0llx:%u, %lx:%lx)\n", dst->name, ev->dst_agent, ev->dst_instid, dst->prof, dst->elite);
+		p += _snprintf_s(p, 400, _TRUNCATE, "combatdemo: ==== cbtevent %u at %llu ====\n", cbtcount, cbtEv->ev->time);
+		p += _snprintf_s(p, 400, _TRUNCATE, "source agent: %s (%0llx:%u, %lx:%lx), master: %u\n", cbtEv->src->name, cbtEv->ev->src_agent, cbtEv->ev->src_instid, cbtEv->src->prof, cbtEv->src->elite, cbtEv->ev->src_master_instid);
+		if (cbtEv->ev->dst_agent) p += _snprintf_s(p, 400, _TRUNCATE, "target agent: %s (%0llx:%u, %lx:%lx)\n", cbtEv->dst->name, cbtEv->ev->dst_agent, cbtEv->ev->dst_instid, cbtEv->dst->prof, cbtEv->dst->elite);
 		else p += _snprintf_s(p, 400, _TRUNCATE, "target agent: n/a\n");
 
 		/* statechange */
-		if (ev->is_statechange) {
-			p += _snprintf_s(p, 400, _TRUNCATE, "is_statechange: %u\n", ev->is_statechange);
+		if (cbtEv->ev->is_statechange) {
+			p += _snprintf_s(p, 400, _TRUNCATE, "is_statechange: %u\n", cbtEv->ev->is_statechange);
 		}
 
 		/* activation */
-		else if (ev->is_activation) {
-			p += _snprintf_s(p, 400, _TRUNCATE, "is_activation: %u\n", ev->is_activation);
-			p += _snprintf_s(p, 400, _TRUNCATE, "skill: %s:%u\n", skillname, ev->skillid);
-			p += _snprintf_s(p, 400, _TRUNCATE, "ms_expected: %d\n", ev->value);
+		else if (cbtEv->ev->is_activation) {
+			p += _snprintf_s(p, 400, _TRUNCATE, "is_activation: %u\n", cbtEv->ev->is_activation);
+			p += _snprintf_s(p, 400, _TRUNCATE, "skill: %s:%u\n", cbtEv->skillname, cbtEv->ev->skillid);
+			p += _snprintf_s(p, 400, _TRUNCATE, "ms_expected: %d\n", cbtEv->ev->value);
 		}
 
 		/* buff remove */
-		else if (ev->is_buffremove) {
-			p += _snprintf_s(p, 400, _TRUNCATE, "is_buffremove: %u\n", ev->is_buffremove);
-			p += _snprintf_s(p, 400, _TRUNCATE, "skill: %s:%u\n", skillname, ev->skillid);
-			p += _snprintf_s(p, 400, _TRUNCATE, "ms_duration: %d\n", ev->value);
-			p += _snprintf_s(p, 400, _TRUNCATE, "ms_intensity: %d\n", ev->buff_dmg);
+		else if (cbtEv->ev->is_buffremove) {
+			p += _snprintf_s(p, 400, _TRUNCATE, "is_buffremove: %u\n", cbtEv->ev->is_buffremove);
+			p += _snprintf_s(p, 400, _TRUNCATE, "skill: %s:%u\n", cbtEv->skillname, cbtEv->ev->skillid);
+			p += _snprintf_s(p, 400, _TRUNCATE, "ms_duration: %d\n", cbtEv->ev->value);
+			p += _snprintf_s(p, 400, _TRUNCATE, "ms_intensity: %d\n", cbtEv->ev->buff_dmg);
 		}
 
 		/* buff */
-		else if (ev->buff) {
+		else if (cbtEv->ev->buff) {
 
 			/* damage */
-			if (ev->buff_dmg) {
-				p += _snprintf_s(p, 400, _TRUNCATE, "is_buff: %u\n", ev->buff);
-				p += _snprintf_s(p, 400, _TRUNCATE, "skill: %s:%u\n", skillname, ev->skillid);
-				p += _snprintf_s(p, 400, _TRUNCATE, "dmg: %d\n", ev->buff_dmg);
-				p += _snprintf_s(p, 400, _TRUNCATE, "is_shields: %u\n", ev->is_shields);
+			if (cbtEv->ev->buff_dmg) {
+				p += _snprintf_s(p, 400, _TRUNCATE, "is_buff: %u\n", cbtEv->ev->buff);
+				p += _snprintf_s(p, 400, _TRUNCATE, "skill: %s:%u\n", cbtEv->skillname, cbtEv->ev->skillid);
+				p += _snprintf_s(p, 400, _TRUNCATE, "dmg: %d\n", cbtEv->ev->buff_dmg);
+				p += _snprintf_s(p, 400, _TRUNCATE, "is_shields: %u\n", cbtEv->ev->is_shields);
 			}
 
 			/* application */
 			else {
-				p += _snprintf_s(p, 400, _TRUNCATE, "is_buff: %u\n", ev->buff);
-				p += _snprintf_s(p, 400, _TRUNCATE, "skill: %s:%u\n", skillname, ev->skillid);
-				p += _snprintf_s(p, 400, _TRUNCATE, "raw ms: %d\n", ev->value);
-				p += _snprintf_s(p, 400, _TRUNCATE, "overstack ms: %u\n", ev->overstack_value);
+				p += _snprintf_s(p, 400, _TRUNCATE, "is_buff: %u\n", cbtEv->ev->buff);
+				p += _snprintf_s(p, 400, _TRUNCATE, "skill: %s:%u\n", cbtEv->skillname, cbtEv->ev->skillid);
+				p += _snprintf_s(p, 400, _TRUNCATE, "raw ms: %d\n", cbtEv->ev->value);
+				p += _snprintf_s(p, 400, _TRUNCATE, "overstack ms: %u\n", cbtEv->ev->overstack_value);
 			}
 		}
 
 		/* strike */
 		else {
-			p += _snprintf_s(p, 400, _TRUNCATE, "is_buff: %u\n", ev->buff);
-			p += _snprintf_s(p, 400, _TRUNCATE, "skill: %s:%u\n", skillname, ev->skillid);
-			p += _snprintf_s(p, 400, _TRUNCATE, "dmg: %d\n", ev->value);
-			p += _snprintf_s(p, 400, _TRUNCATE, "is_moving: %u\n", ev->is_moving);
-			p += _snprintf_s(p, 400, _TRUNCATE, "is_ninety: %u\n", ev->is_ninety);
-			p += _snprintf_s(p, 400, _TRUNCATE, "is_flanking: %u\n", ev->is_flanking);
-			p += _snprintf_s(p, 400, _TRUNCATE, "is_shields: %u\n", ev->is_shields);
+			p += _snprintf_s(p, 400, _TRUNCATE, "is_buff: %u\n", cbtEv->ev->buff);
+			p += _snprintf_s(p, 400, _TRUNCATE, "skill: %s:%u\n", cbtEv->skillname, cbtEv->ev->skillid);
+			p += _snprintf_s(p, 400, _TRUNCATE, "dmg: %d\n", cbtEv->ev->value);
+			p += _snprintf_s(p, 400, _TRUNCATE, "is_moving: %u\n", cbtEv->ev->is_moving);
+			p += _snprintf_s(p, 400, _TRUNCATE, "is_ninety: %u\n", cbtEv->ev->is_ninety);
+			p += _snprintf_s(p, 400, _TRUNCATE, "is_flanking: %u\n", cbtEv->ev->is_flanking);
+			p += _snprintf_s(p, 400, _TRUNCATE, "is_shields: %u\n", cbtEv->ev->is_shields);
 		}
 
 		/* common */
-		p += _snprintf_s(p, 400, _TRUNCATE, "iff: %u\n", ev->iff);
-		p += _snprintf_s(p, 400, _TRUNCATE, "result: %u\n", ev->result);
+		p += _snprintf_s(p, 400, _TRUNCATE, "iff: %u\n", cbtEv->ev->iff);
+		p += _snprintf_s(p, 400, _TRUNCATE, "result: %u\n", cbtEv->ev->result);
 		cbtcount += 1;
 	}
 
 	/* print */
-	log_arc(&buff[0]);
-	//log_file(&buff[0]);
-	return 0;
+	APIDefs->Log(ELogLevel_DEBUG, &buff[0]);
 }
