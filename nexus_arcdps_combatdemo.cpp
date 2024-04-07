@@ -73,7 +73,9 @@ AddonAPI* APIDefs = nullptr;
 void mod_init(AddonAPI*);
 void mod_release();
 UINT mod_wnd(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
-void mod_combat(void*);
+void mod_combat_local(void*);
+void mod_combat_squad(void*);
+void mod_combat(bool, void*);
 
 /* arcdps exports */
 void* filelog;
@@ -101,7 +103,7 @@ extern "C" __declspec(dllexport) AddonDefinition* GetAddonDef()
 	AddonDef.Version.Minor = 1;
 	AddonDef.Version.Build = 0;
 	AddonDef.Version.Revision = 0;
-	AddonDef.Author = "Raidcore (Port)";
+	AddonDef.Author = "Raidcore, deltaconnected";
 	AddonDef.Description = "arcdps combatdemo";
 	AddonDef.Load = mod_init;
 	AddonDef.Unload = mod_release;
@@ -113,19 +115,19 @@ extern "C" __declspec(dllexport) AddonDefinition* GetAddonDef()
 void mod_init(AddonAPI* aApi)
 {
 	APIDefs = aApi;
-	ImGui::SetCurrentContext(APIDefs->ImguiContext);
+	ImGui::SetCurrentContext((ImGuiContext*)APIDefs->ImguiContext);
 	ImGui::SetAllocatorFunctions((void* (*)(size_t, void*))APIDefs->ImguiMalloc, (void(*)(void*, void*))APIDefs->ImguiFree); // on imgui 1.80+
 
-	APIDefs->SubscribeEvent("EV_ARCDPS_COMBATEVENT_LOCAL_RAW", mod_combat);
-	APIDefs->SubscribeEvent("EV_ARCDPS_COMBATEVENT_SQUAD_RAW", mod_combat);
+	APIDefs->SubscribeEvent("EV_ARCDPS_COMBATEVENT_LOCAL_RAW", mod_combat_local);
+	APIDefs->SubscribeEvent("EV_ARCDPS_COMBATEVENT_SQUAD_RAW", mod_combat_squad);
 
-	APIDefs->Log(ELogLevel_INFO, "combatdemo: done mod_init");
+	APIDefs->Log(ELogLevel_INFO, "combatdemo", "done mod_init");
 }
 
 void mod_release()
 {
-	APIDefs->UnsubscribeEvent("EV_ARCDPS_COMBATEVENT_LOCAL_RAW", mod_combat);
-	APIDefs->UnsubscribeEvent("EV_ARCDPS_COMBATEVENT_SQUAD_RAW", mod_combat);
+	APIDefs->UnsubscribeEvent("EV_ARCDPS_COMBATEVENT_LOCAL_RAW", mod_combat_local);
+	APIDefs->UnsubscribeEvent("EV_ARCDPS_COMBATEVENT_SQUAD_RAW", mod_combat_squad);
 }
 
 UINT mod_wnd(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -162,9 +164,19 @@ struct EvCombatData
 	uint64_t revision;
 };
 
+/* wrapper functions simply to log to different nexus channels */
+void mod_combat_local(void* aEventArgs)
+{
+	mod_combat(true, aEventArgs);
+}
+void mod_combat_squad(void* aEventArgs)
+{
+	mod_combat(true, aEventArgs);
+}
+
 /* combat callback -- may be called asynchronously, use id param to keep track of order, first event id will be 2. return ignored */
 /* at least one participant will be party/squad or minion of, or a buff applied by squad in the case of buff remove. not all statechanges present, see evtc statechange enum */
-void mod_combat(void* aEventArgs)
+void mod_combat(bool aIsLocal, void* aEventArgs)
 {
 	EvCombatData* cbtEv = (EvCombatData*)aEventArgs;
 
@@ -269,5 +281,5 @@ void mod_combat(void* aEventArgs)
 	}
 
 	/* print */
-	APIDefs->Log(ELogLevel_DEBUG, &buff[0]);
+	APIDefs->Log(ELogLevel_DEBUG, aIsLocal ? "Combat area (local)" : "Combat area (squad)", &buff[0]);
 }
